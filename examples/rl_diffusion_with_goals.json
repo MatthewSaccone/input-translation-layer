@@ -1,0 +1,14 @@
+﻿{
+  "schema_version": "1.0",
+  "algorithm_id": "rl_diffusion",
+  "operation": "sample",
+  "parameters": {
+    "n_samples": 50,
+    "requested_objectives": {
+      "qed": "maximize",
+      "sas": "minimize"
+    }
+  },
+  "inputs": {},
+  "unresolved": []
+}

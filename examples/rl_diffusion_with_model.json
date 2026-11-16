@@ -1,0 +1,13 @@
+﻿{
+  "schema_version": "1.0",
+  "algorithm_id": "rl_diffusion",
+  "operation": "sample",
+  "parameters": {
+    "n_samples": 100,
+    "save_to_xyz": true
+  },
+  "inputs": {
+    "model_ref": "model_rl_001"
+  },
+  "unresolved": []
+}

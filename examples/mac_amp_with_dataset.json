@@ -1,0 +1,12 @@
+{
+  "schema_version": "1.0",
+  "algorithm_id": "mac_amp",
+  "operation": "peptide_generation",
+  "parameters": {
+    "target_organism": "Escherichia coli"
+  },
+  "inputs": {
+    "peptide_dataset_ref": "upload_peptides_001"
+  },
+  "unresolved": []
+}

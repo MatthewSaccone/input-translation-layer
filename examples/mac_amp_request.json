@@ -6,5 +6,5 @@
     "target_organism": "Escherichia coli"
   },
   "inputs": {},
-  "unresolved": ["peptide_dataset_ref"]
+  "unresolved": []
 }

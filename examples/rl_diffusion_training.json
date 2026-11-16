@@ -1,0 +1,16 @@
+{
+  "schema_version": "1.0",
+  "algorithm_id": "rl_diffusion",
+  "operation": "train",
+  "parameters": {
+    "conditioning": [
+      "qed",
+      "sas",
+      "affinity"
+    ]
+  },
+  "inputs": {
+    "training_dataset_ref": "upload_molecules_001"
+  },
+  "unresolved": []
+}
