@@ -1,0 +1,155 @@
+[
+  {
+    "prompt": "Generate antimicrobial peptides targeting E. coli",
+    "passed": true,
+    "result": {
+      "schema_version": "1.0",
+      "algorithm_id": "mac_amp",
+      "operation": "peptide_generation",
+      "parameters": {
+        "target_organism": "E. coli"
+      },
+      "inputs": {},
+      "unresolved": []
+    }
+  },
+  {
+    "prompt": "Create 50 new 3D molecules",
+    "passed": true,
+    "result": {
+      "schema_version": "1.0",
+      "algorithm_id": "rl_diffusion",
+      "operation": "sample",
+      "parameters": {
+        "n_samples": 50
+      },
+      "inputs": {},
+      "unresolved": []
+    }
+  },
+  {
+    "prompt": "Train a molecular diffusion model on my data",
+    "passed": true,
+    "result": {
+      "schema_version": "1.0",
+      "algorithm_id": "rl_diffusion",
+      "operation": "train",
+      "parameters": {},
+      "inputs": {},
+      "unresolved": [
+        "training dataset required"
+      ]
+    }
+  },
+  {
+    "prompt": "Generate some promising candidates",
+    "passed": true,
+    "result": {
+      "schema_version": "1.0",
+      "algorithm_id": null,
+      "operation": null,
+      "parameters": {},
+      "inputs": {},
+      "unresolved": [
+        "promising candidates",
+        "algorithm_id",
+        "operation"
+      ]
+    }
+  },
+  {
+    "prompt": "Make 25 molecules but do not save XYZ",
+    "passed": true,
+    "result": {
+      "schema_version": "1.0",
+      "algorithm_id": "rl_diffusion",
+      "operation": "sample",
+      "parameters": {
+        "n_samples": 25,
+        "save_to_xyz": false
+      },
+      "inputs": {},
+      "unresolved": []
+    }
+  },
+  {
+    "prompt": "Generate peptides for a bacterium",
+    "passed": true,
+    "result": {
+      "schema_version": "1.0",
+      "algorithm_id": "mac_amp",
+      "operation": "peptide_generation",
+      "parameters": {},
+      "inputs": {},
+      "unresolved": []
+    }
+  },
+  {
+    "prompt": "Make 30 molecules with high drug-likeness",
+    "passed": true,
+    "result": {
+      "schema_version": "1.0",
+      "algorithm_id": "rl_diffusion",
+      "operation": "sample",
+      "parameters": {
+        "n_samples": 30,
+        "requested_objectives": {
+          "qed": "maximize"
+        }
+      },
+      "inputs": {},
+      "unresolved": [
+        "numerical_objective_requires_schema_approval:qed:>:0.5"
+      ]
+    }
+  },
+  {
+    "prompt": "Generate 20 molecules with QED at least 0.8",
+    "passed": true,
+    "result": {
+      "schema_version": "1.0",
+      "algorithm_id": "rl_diffusion",
+      "operation": "sample",
+      "parameters": {
+        "n_samples": 20,
+        "requested_objectives": {
+          "qed": "maximize"
+        }
+      },
+      "inputs": {},
+      "unresolved": [
+        "numerical_objective_requires_schema_approval:qed:>=:0.8"
+      ]
+    }
+  },
+  {
+    "prompt": "I want 20 molecules and 50 molecules",
+    "passed": true,
+    "result": {
+      "schema_version": "1.0",
+      "algorithm_id": "rl_diffusion",
+      "operation": "sample",
+      "parameters": {},
+      "inputs": {},
+      "unresolved": [
+        "Ambiguous sample count requested: 20 molecules and 50 molecules."
+      ]
+    }
+  },
+  {
+    "prompt": "Use a fictional unsupported algorithm to simulate protein folding",
+    "passed": true,
+    "result": {
+      "schema_version": "1.0",
+      "algorithm_id": null,
+      "operation": null,
+      "parameters": {},
+      "inputs": {},
+      "unresolved": [
+        "Use of a fictional unsupported algorithm for protein folding.",
+        "algorithm_id",
+        "operation"
+      ]
+    }
+  }
+]
