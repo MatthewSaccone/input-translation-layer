@@ -1,8 +1,2 @@
-# Official OpenAI Python SDK (v1.50+ required for .beta.chat.completions.parse Structured Outputs)
-openai>=1.50.0
-
-# Pydantic v2 for strict schema validation, field bounds, and auto-resolving paths
-pydantic>=2.9.0
-
-# Loads environment variables (OPENAI_API_KEY, OPENAI_MODEL, MAX_COMPLETION_TOKENS) from .env
-python-dotenv>=1.0.1
+pydantic>=2.0.0
+pyyaml>=6.0.0

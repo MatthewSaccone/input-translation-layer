@@ -1,10 +1,9 @@
 """
 schema.py — Spec-Kit Data Contract & Pydantic Validation Schema for CLMFAP/MAC-AMP_v1
 =====================================================================================
-This module defines the strict Pydantic v2 data structures that constrain the OpenAI
-model's output (via Structured Outputs). It guarantees that any plain-English user
-request is mapped into the exact parameter names, types, and file path conventions
-required by MAC-AMP_v1 (`MAC_AMP_Multi_Agent_Framework/cfg/config.yaml`).
+This module defines the strict Pydantic v2 data structures that validate and map
+structured upstream JSON requests into the exact parameter names, types, and file
+path conventions required by MAC-AMP_v1 (`MAC_AMP_Multi_Agent_Framework/cfg/config.yaml`).
 """
 
 import json
@@ -15,7 +14,7 @@ from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 # Dynamic Spec-Kit Template Loader
-# Locate the project root and the Spec-Kit default template file on disk.
+# Locate the package directory and the Spec-Kit default template file on disk.
 # By loading defaults from `.specify/templates/config-template.json` at import
 # time, `.specify/` remains the single source of truth for default values.
 BASE_DIR = Path(__file__).resolve().parent
@@ -25,7 +24,7 @@ CONFIG_TEMPLATE_PATH = BASE_DIR / ".specify" / "templates" / "config-template.js
 def _load_template_defaults() -> Dict[str, Any]:
     """Reads default configuration values from Spec-Kit's config-template.json."""
     if CONFIG_TEMPLATE_PATH.exists():
-        return json.loads(CONFIG_TEMPLATE_PATH.read_text(encoding="utf-8"))
+        return json.loads(CONFIG_TEMPLATE_PATH.read_text(encoding="utf-8-sig"))
     return {}
 
 
@@ -37,26 +36,37 @@ _DEFAULTS = _load_template_defaults()
 #      and reference PDB directory names.
 #   2. Two-letter bacterium code (e.g., "EC") passed to `predict_mic()` inside
 #      `evaluation_service.py`.
-# This dictionary maps common user phrasings/abbreviations to (CanonicalName, Code).
+# This dictionary maps supported user/LLM organism names and abbreviations to (CanonicalName, Code).
 BACTERIUM_CODE_MAP: Dict[str, tuple[str, str]] = {
     "escherichia_coli": ("Escherichia_coli", "EC"),
     "e_coli": ("Escherichia_coli", "EC"),
     "ecoli": ("Escherichia_coli", "EC"),
+    "ec": ("Escherichia_coli", "EC"),
     "staphylococcus_aureus": ("Staphylococcus_aureus", "SA"),
     "s_aureus": ("Staphylococcus_aureus", "SA"),
     "saureus": ("Staphylococcus_aureus", "SA"),
     "mrsa": ("Staphylococcus_aureus", "SA"),
+    "sa": ("Staphylococcus_aureus", "SA"),
     "pseudomonas_aeruginosa": ("Pseudomonas_aeruginosa", "PA"),
     "p_aeruginosa": ("Pseudomonas_aeruginosa", "PA"),
     "paeruginosa": ("Pseudomonas_aeruginosa", "PA"),
+    "pa": ("Pseudomonas_aeruginosa", "PA"),
     "klebsiella_pneumoniae": ("Klebsiella_pneumoniae", "KP"),
     "k_pneumoniae": ("Klebsiella_pneumoniae", "KP"),
+    "kpneumoniae": ("Klebsiella_pneumoniae", "KP"),
+    "kp": ("Klebsiella_pneumoniae", "KP"),
     "enterococcus_faecium": ("Enterococcus_faecium", "EF"),
     "e_faecium": ("Enterococcus_faecium", "EF"),
+    "efaecium": ("Enterococcus_faecium", "EF"),
+    "ef": ("Enterococcus_faecium", "EF"),
 }
 
+SUPPORTED_BACTERIA: tuple[str, ...] = tuple(
+    dict.fromkeys(canonical for canonical, _ in BACTERIUM_CODE_MAP.values())
+)
 
-#Allowed Peer-Review Experiment Modes
+
+# Allowed Peer-Review Experiment Modes
 # Matches the `choices` list in `run_ppo_training.py` (--experiment flag),
 # controlling whether MAC-AMP's peer-review module uses OpenAI API or local
 # Ollama models (Llama 3.1 / Qwen 2.5).
@@ -68,8 +78,7 @@ class ExperimentType(str, Enum):
     API_REVIEWERS_QWEN_AC = "api_reviewers_qwen_ac"
 
 
-
-#Core MAC-AMP_v1 Configuration Schema (`MacAmpConfig`)
+# Core MAC-AMP_v1 Configuration Schema (`MacAmpConfig`)
 class MacAmpConfig(BaseModel):
     """
     Exact configuration schema matching CLMFAP/MAC-AMP_v1:
@@ -78,10 +87,10 @@ class MacAmpConfig(BaseModel):
       - MAC_AMP_Multi_Agent_Framework/code/run_ppo_training.py
       - MAC_AMP_Multi_Agent_Framework/code/evaluation_service.py
     """
-    # Forbid any extra/hallucinated fields not explicitly defined in this class
+    # Forbid any extra/unsupported fields not explicitly defined in this class
     model_config = ConfigDict(extra="forbid")
 
-    # --- Section 4A: Target Bacterium & Auto-Resolved Dataset Paths
+    # --- Section 4A: Target Bacterium & Auto-Resolved Dataset / Model Paths
     target_bacterium: str = Field(
         ...,
         min_length=1,
@@ -111,6 +120,13 @@ class MacAmpConfig(BaseModel):
         description=(
             "Path to reference PDB structures used by Foldseek in evaluation_service.py. "
             "Auto-resolves to '/data/AMP_<target_bacterium>_811_new/ref_pdbs' when omitted."
+        ),
+    )
+    model_path: str = Field(
+        default=_DEFAULTS.get("model_path", "../Generation_Module/model_ckpt"),
+        description=(
+            "Path to the pretrained AMP generator checkpoint directory "
+            "(passed as --model_path to run_ppo_training.py and read via cfg.get('model_path') in main_workflow.py)."
         ),
     )
 
@@ -224,35 +240,27 @@ class MacAmpConfig(BaseModel):
         description="Experiment log directory tag."
     )
 
-    # Post-Parse Auto-Resolution Validator
-    # Runs automatically after the LLM populates MacAmpConfig.
-    # It normalizes the bacterium name, looks up the 2-letter bacterium_code,
-    # and auto-fills warmup_dir and ref_pdb_path if the user didn't supply them.
+    # Post-Parse Auto-Resolution & Supported Bacterium Validator
+    # Runs automatically when MacAmpConfig is constructed.
+    # It normalizes the bacterium name against BACTERIUM_CODE_MAP, rejects unsupported
+    # bacteria, looks up the 2-letter bacterium_code, and auto-fills warmup_dir and
+    # ref_pdb_path if the user didn't supply custom paths.
     @model_validator(mode="after")
     def resolve_mac_amp_bacterium_and_paths(self) -> "MacAmpConfig":
-        # Convert user bacterium input (e.g. "Escherichia coli" or "E. coli") to a lookup key
         raw_key = re.sub(r"[^a-z0-9]+", "_", self.target_bacterium.strip().lower()).strip("_")
 
-        if raw_key in BACTERIUM_CODE_MAP:
-            canonical_name, code = BACTERIUM_CODE_MAP[raw_key]
-        else:
-            # Fallback for unmapped bacteria: format as "Genus_species" and take initials
-            parts = [p for p in re.split(r"[\s_]+", self.target_bacterium.strip()) if p]
-            canonical_name = (
-                "_".join([parts[0].capitalize()] + [p.lower() for p in parts[1:]])
-                if parts
-                else "Escherichia_coli"
-            )
-            code = (
-                "".join(p[0].upper() for p in parts[:2])
-                if len(parts) >= 2
-                else canonical_name[:2].upper()
+        if raw_key not in BACTERIUM_CODE_MAP:
+            supported_str = ", ".join(SUPPORTED_BACTERIA)
+            raise ValueError(
+                f"Unsupported target bacterium '{self.target_bacterium}'. "
+                f"Supported MAC-AMP organisms are: {supported_str}."
             )
 
+        canonical_name, code = BACTERIUM_CODE_MAP[raw_key]
         self.target_bacterium = canonical_name
         self.bacterium_code = code
 
-        # Auto-resolve the public warmup MIC CSV path if the user didn't specify a custom CSV
+        # Auto-resolve the warmup MIC CSV path if a custom CSV was not specified
         if not self.warmup_dir or "<" in self.warmup_dir:
             self.warmup_dir = f"../Generation_Module/data/warmup/warmup_AMP_{canonical_name}.csv"
         else:
@@ -268,13 +276,9 @@ class MacAmpConfig(BaseModel):
         return self
 
 
-
 # Top-Level Fail-Closed Envelope (`TranslationResult`)
-# Wrapping MacAmpConfig inside TranslationResult gives the LLM a safe way to
-# reject prompts that are missing a target bacterium (`status="clarification_required"`)
-# instead of hallucinating a bacterium name.
 class TranslationResult(BaseModel):
-    """Envelope returned by the OpenAI Structured Outputs parser."""
+    """Envelope returned by the MAC-AMP Input Adapter."""
     model_config = ConfigDict(extra="forbid")
 
     status: Literal["success", "clarification_required"]

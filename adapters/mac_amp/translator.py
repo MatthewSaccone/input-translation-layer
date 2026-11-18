@@ -1,32 +1,70 @@
 """
-Acts as the translation component between:
-  1. Upstream Layer: Provides a plain-English user prompt.
-  2. Spec-Kit (.specify/): Supplies the project constitution and default configuration template.
-  3. Downstream Layer (MAC-AMP_v1): Receives a ready-to-run Hydra `config.yaml` payload.
+MAC-AMP Input Adapter (`SpecKitTranslator` / `MacAmpAdapter`)
+=============================================================
+Fits into the unified pipeline:
+  User Prompt -> LLM Interpreter -> Core Validator -> MAC-AMP Adapter -> MAC-AMP Configuration
+
+Responsibilities:
+  1. Accept the validated 6-field JSON request (`schema_version`, `algorithm_id`, `operation`,
+     `parameters`, `inputs`, `unresolved`) from the Core Validator without making any OpenAI API calls.
+  2. Map JSON `parameters` (such as `target_organism` -> `target_bacterium` and any supported
+     MAC-AMP hyperparameters) and `inputs` (`peptide_dataset_ref`, `model_ref`, `workflow_config_ref`)
+     to the Pydantic `MacAmpConfig` model.
+  3. Apply Spec-Kit defaults from `.specify/templates/config-template.json`, verify supported
+     bacteria, and validate that required dataset paths, model files, and resources exist.
+  4. Generate the ready-to-run MAC-AMP_v1 Hydra `config.yaml` payload and Spec-Kit artifacts.
 """
 
 import argparse
 import json
-import os
 import re
 import sys
 from pathlib import Path
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, List, Mapping, Optional, Union
 
-from dotenv import load_dotenv
-from openai import OpenAI
+from pydantic import ValidationError
 
 try:
-    from .schema import BASE_DIR, MacAmpConfig, TranslationResult
+    from .schema import BASE_DIR, MacAmpConfig, SUPPORTED_BACTERIA, TranslationResult
 except ImportError:
-    from schema import BASE_DIR, MacAmpConfig, TranslationResult
+    from schema import BASE_DIR, MacAmpConfig, SUPPORTED_BACTERIA, TranslationResult
 
-# Load OPENAI_API_KEY, OPENAI_MODEL, and MAX_COMPLETION_TOKENS from .env
-load_dotenv()
-
-CONSTITUTION_PATH = BASE_DIR / ".specify" / "memory" / "constitution.md"
 CONFIG_TEMPLATE_PATH = BASE_DIR / ".specify" / "templates" / "config-template.json"
 
+# Maps upstream JSON parameter names to MacAmpConfig field names
+PARAMETER_ALIASES: Dict[str, str] = {
+    "target_organism": "target_bacterium",
+    "target_bacterium": "target_bacterium",
+    "bacterium_code": "bacterium_code",
+    "warmup_dir": "warmup_dir",
+    "ref_pdb_path": "ref_pdb_path",
+    "model_path": "model_path",
+    "task": "task",
+    "env_name": "env_name",
+    "model": "model",
+    "temperature": "temperature",
+    "suffix": "suffix",
+    "num_samples": "num_samples",
+    "n_samples": "num_samples",
+    "sample": "sample",
+    "max_seq_len": "max_seq_len",
+    "max_length": "max_length",
+    "batch_size": "batch_size",
+    "real_epoch": "real_epoch",
+    "epochs": "real_epoch",
+    "sand_box_epoch": "sand_box_epoch",
+    "real_train_stage_iteration": "real_train_stage_iteration",
+    "sandbox_iteration": "sandbox_iteration",
+    "reward_sample_num": "reward_sample_num",
+    "ablation_mode": "ablation_mode",
+    "skip_independent_reviewer": "skip_independent_reviewer",
+    "drift_wordlist": "drift_wordlist",
+    "experiment": "experiment",
+    "default_sign": "default_sign",
+    "log_path": "log_path",
+}
+
+ALLOWED_INPUT_REFS = {"peptide_dataset_ref", "model_ref", "workflow_config_ref"}
 
 
 # Hydra YAML Serializer (`_dict_to_hydra_yaml`)
@@ -51,6 +89,7 @@ def _dict_to_hydra_yaml(payload: Dict[str, Any]) -> str:
         f'bacterium_code: "{payload["bacterium_code"]}"',
         f'warmup_dir: "{payload["warmup_dir"]}"',
         f'ref_pdb_path: "{payload["ref_pdb_path"]}"',
+        f'model_path: "{payload["model_path"]}"',
         "",
         "# env",
         f'task: {payload["task"]}',
@@ -85,148 +124,388 @@ def _dict_to_hydra_yaml(payload: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-# Core Translation Component (`SpecKitTranslator`)
 class SpecKitTranslator:
     """
-    Translates plain-English user requests into validated MAC-AMP_v1 Hydra YAML configs.
+    Translates validated 6-field MAC-AMP JSON requests into validated MAC-AMP_v1 Hydra YAML configs.
+    Does not call any external LLM API.
     """
 
-    # Client & Cost-Control Setup 
     def __init__(
         self,
-        api_key: Optional[str] = None,
-        model: Optional[str] = None,
-        max_completion_tokens: Optional[int] = None,
-        dry_run: bool = False,
+        resource_root: Optional[Union[str, Path]] = None,
+        resource_registry: Optional[Mapping[str, Union[str, Path]]] = None,
+        verify_resources: bool = False,
+        **_: Any,
     ):
-        self.dry_run = dry_run
-        # Default to gpt-4o-mini (~$0.0002/run) and cap output at 300 tokens
-        self.model = model or os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-        self.max_completion_tokens = max_completion_tokens or int(
-            os.getenv("MAX_COMPLETION_TOKENS", "300")
+        """
+        Args:
+            resource_root: Optional base directory used to resolve relative dataset, model,
+                and workflow config paths when verifying resource existence on disk.
+            resource_registry: Optional mapping from logical reference IDs (e.g.
+                `"upload_peptides_001"`, `"model_amp_001"`) to file/directory paths.
+            verify_resources: When True (or when `resource_root` is provided), checks that
+                resolved dataset paths, model files/directories, and workflow configs
+                physically exist on disk.
+        """
+        self.resource_root: Optional[Path] = Path(resource_root) if resource_root is not None else None
+        self.resource_registry: Dict[str, str] = {
+            k: str(v) for k, v in (resource_registry or {}).items()
+        }
+        self.verify_resources: bool = verify_resources or (self.resource_root is not None)
+
+    def _parse_upstream_json(
+        self, upstream_input: Union[str, Path, Mapping[str, Any]]
+    ) -> Dict[str, Any]:
+        """Accepts a dictionary, a JSON string, or a path to a .json file."""
+        if isinstance(upstream_input, Mapping):
+            return dict(upstream_input)
+
+        if isinstance(upstream_input, Path):
+            if not upstream_input.exists() or not upstream_input.is_file():
+                raise FileNotFoundError(f"Input JSON file not found: {upstream_input}")
+            return json.loads(upstream_input.read_text(encoding="utf-8-sig"))
+
+        if isinstance(upstream_input, str):
+            text = upstream_input.lstrip("\ufeff").strip()
+            if not text:
+                raise ValueError("Input JSON cannot be empty.")
+
+            # If it starts with '{', parse directly as a JSON object string
+            if text.startswith("{"):
+                parsed = json.loads(text)
+                if not isinstance(parsed, dict):
+                    raise ValueError("Input JSON must decode to a JSON object.")
+                return parsed
+
+            # If it points to an existing .json file on disk, load it
+            candidate_path = Path(text)
+            if candidate_path.suffix.lower() == ".json":
+                if not candidate_path.exists() or not candidate_path.is_file():
+                    raise FileNotFoundError(f"Input JSON file not found: {candidate_path}")
+                parsed = json.loads(candidate_path.read_text(encoding="utf-8-sig"))
+                if not isinstance(parsed, dict):
+                    raise ValueError("Input JSON file must contain a JSON object.")
+                return parsed
+
+            raise ValueError(
+                "MAC-AMP Adapter expects a structured 6-field JSON request (dict, JSON string, "
+                "or path to a .json file), not unstructured natural language."
+            )
+
+        raise TypeError(
+            f"Unsupported upstream_input type: {type(upstream_input).__name__}. "
+            "Expected dict, JSON string, or Path."
         )
 
-        # Only initialize the OpenAI client when not running in zero-token dry-run mode
-        if not self.dry_run:
-            resolved_key = api_key or os.getenv("OPENAI_API_KEY")
-            if not resolved_key or resolved_key == "sk-your-openai-api-key-here":
-                raise EnvironmentError(
-                    "Missing OpenAI API key. Set OPENAI_API_KEY in .env, pass api_key=..., "
-                    "or run with --dry-run (0 tokens)."
+    def _resolve_resource_path(self, ref_or_path: str, default_suffix: str = "") -> Path:
+        """Maps a logical reference ID or file path to a concrete filesystem Path."""
+        mapped = self.resource_registry.get(ref_or_path, ref_or_path)
+        p = Path(mapped)
+        if not p.is_absolute() and self.resource_root is not None:
+            # Handle relative paths starting with ../ or /data/ inside a resource_root sandbox
+            cleaned = str(mapped).replace("\\", "/")
+            while cleaned.startswith("../"):
+                cleaned = cleaned[3:]
+            cleaned = cleaned.lstrip("/")
+            candidate = self.resource_root / cleaned
+            if candidate.exists():
+                return candidate
+            if default_suffix and not cleaned.lower().endswith(default_suffix):
+                with_suffix = self.resource_root / f"{cleaned}{default_suffix}"
+                if with_suffix.exists():
+                    return with_suffix
+            return candidate
+        if str(mapped).startswith("/data/") and self.resource_root is not None:
+            return self.resource_root / str(mapped).lstrip("/")
+        return p
+
+    def _load_workflow_config_overrides(self, workflow_ref: str) -> Dict[str, Any]:
+        """Loads optional MAC-AMP parameter overrides from a workflow_config_ref JSON/YAML file."""
+        path = self._resolve_resource_path(workflow_ref)
+        if not path.exists() or not path.is_file():
+            if self.verify_resources or Path(workflow_ref).suffix.lower() in {".json", ".yaml", ".yml"}:
+                raise FileNotFoundError(
+                    f"Required workflow_config_ref file does not exist: '{workflow_ref}' (resolved to '{path}')"
                 )
-            self.client: Optional[OpenAI] = OpenAI(api_key=resolved_key)
+            return {}
+
+        raw_text = path.read_text(encoding="utf-8-sig")
+        if path.suffix.lower() == ".json":
+            loaded = json.loads(raw_text)
         else:
-            self.client = None
+            try:
+                import yaml  # type: ignore
+                loaded = yaml.safe_load(raw_text)
+            except ImportError:
+                loaded = {}
+                for line in raw_text.splitlines():
+                    stripped = line.strip()
+                    if not stripped or stripped.startswith("#") or stripped.startswith("-") or ":" not in stripped:
+                        continue
+                    k, v = stripped.split(":", 1)
+                    k = k.strip()
+                    v = v.split("#", 1)[0].strip().strip('"').strip("'")
+                    if v:
+                        try:
+                            loaded[k] = json.loads(v)
+                        except Exception:
+                            loaded[k] = v
 
-    # Dynamic Spec-Kit System Prompt Builder 
-    def _build_system_prompt(self) -> str:
+        if not isinstance(loaded, dict):
+            raise ValueError(f"workflow_config_ref '{workflow_ref}' must contain a key-value mapping.")
+
+        overrides: Dict[str, Any] = {}
+        for key, value in loaded.items():
+            if key in ("defaults", "hydra"):
+                continue
+            if key in PARAMETER_ALIASES:
+                overrides[PARAMETER_ALIASES[key]] = value
+            else:
+                raise ValueError(f"Unsupported MAC-AMP parameter '{key}' in workflow_config_ref.")
+        return overrides
+
+    def _verify_required_resources(
+        self,
+        config: MacAmpConfig,
+        inputs: Mapping[str, Any],
+    ) -> List[str]:
         """
-        Reads `.specify/memory/constitution.md` and `.specify/templates/config-template.json`
-        from disk so the LLM's instructions always reflect your latest Spec-Kit rules.
+        Verifies that required dataset paths, model files, and input references exist.
+        Returns a list of missing resource identifiers/messages.
         """
-        constitution_text = (
-            CONSTITUTION_PATH.read_text(encoding="utf-8")
-            if CONSTITUTION_PATH.exists()
-            else ""
-        )
-        template_json = (
-            CONFIG_TEMPLATE_PATH.read_text(encoding="utf-8")
-            if CONFIG_TEMPLATE_PATH.exists()
-            else "{}"
-        )
-        return (
-            "You are the Spec-Kit NLP-to-Configuration translation component for CLMFAP/MAC-AMP_v1.\n"
-            "Follow the project Constitution and Default Config Template below strictly.\n\n"
-            f"=== CONSTITUTION (.specify/memory/constitution.md) ===\n{constitution_text}\n\n"
-            f"=== DEFAULT TEMPLATE (.specify/templates/config-template.json) ===\n{template_json}"
+        missing: List[str] = []
+
+        # 1. Check workflow_config_ref if provided
+        workflow_ref = inputs.get("workflow_config_ref")
+        if workflow_ref:
+            wf_path = self._resolve_resource_path(str(workflow_ref))
+            if (self.verify_resources or wf_path.suffix.lower() in {".json", ".yaml", ".yml"}) and not wf_path.exists():
+                missing.append(f"workflow_config_ref ({workflow_ref})")
+
+        # 2. Check peptide dataset / warmup_dir
+        dataset_ref = inputs.get("peptide_dataset_ref")
+        if dataset_ref:
+            ds_path = self._resolve_resource_path(str(dataset_ref), default_suffix=".csv")
+            if (self.verify_resources or str(dataset_ref).lower().endswith(".csv")) and not ds_path.is_file():
+                missing.append(f"peptide_dataset_ref ({dataset_ref})")
+        elif self.verify_resources and config.warmup_dir:
+            warmup_path = self._resolve_resource_path(config.warmup_dir)
+            if not warmup_path.is_file():
+                missing.append(f"warmup_dir ({config.warmup_dir})")
+
+        # 3. Check model checkpoint directory / model_ref
+        model_ref = inputs.get("model_ref")
+        if model_ref:
+            m_path = self._resolve_resource_path(str(model_ref))
+            if self.verify_resources and not m_path.exists():
+                missing.append(f"model_ref ({model_ref})")
+        elif self.verify_resources and config.model_path:
+            mp = self._resolve_resource_path(config.model_path)
+            if not mp.exists():
+                missing.append(f"model_path ({config.model_path})")
+
+        # 4. Check reference PDB directory when full resource verification is active
+        if self.verify_resources and config.ref_pdb_path:
+            pdb_path = self._resolve_resource_path(config.ref_pdb_path)
+            if not pdb_path.exists():
+                missing.append(f"ref_pdb_path ({config.ref_pdb_path})")
+
+        return missing
+
+    def translate(
+        self, upstream_input: Union[str, Path, Mapping[str, Any]]
+    ) -> TranslationResult:
+        """
+        Validates a 6-field TranslationRequest JSON and maps it into a `TranslationResult`
+        containing the validated `MacAmpConfig`. Makes zero external API calls.
+        """
+        data = self._parse_upstream_json(upstream_input)
+
+        # Detect if a raw MacAmpConfig payload was passed directly or a 6-field TranslationRequest
+        is_six_field = any(
+            k in data
+            for k in ("schema_version", "algorithm_id", "operation", "parameters", "inputs", "unresolved")
         )
 
-    # Zero-Token Local Dry-Run Parser ---
-    def _dry_run_translate(self, upstream_input: str) -> TranslationResult:
-        """
-        Offline regex fallback used when `--dry-run` is passed.
-        Allows testing upstream -> downstream layer integration for $0.00 (0 tokens).
-        """
-        bacterium_match = re.search(
-            r"(?:targeting|target|against|category|for)\s+([A-Za-z0-9_.\-]+(?:\s+[A-Za-z0-9_.\-]+)?)",
-            upstream_input,
-            re.IGNORECASE,
-        )
-        if not bacterium_match:
+        if is_six_field:
+            schema_version = data.get("schema_version", "1.0")
+            if schema_version != "1.0":
+                return TranslationResult(
+                    status="clarification_required",
+                    config=None,
+                    missing_or_ambiguous_fields=["schema_version"],
+                    clarification_message=f"Unsupported schema_version '{schema_version}'. Expected '1.0'.",
+                )
+
+            algorithm_id = data.get("algorithm_id")
+            if algorithm_id != "mac_amp":
+                return TranslationResult(
+                    status="clarification_required",
+                    config=None,
+                    missing_or_ambiguous_fields=["algorithm_id"],
+                    clarification_message=(
+                        f"MAC-AMP Adapter only accepts algorithm_id='mac_amp', got '{algorithm_id}'."
+                    ),
+                )
+
+            operation = data.get("operation")
+            if operation != "peptide_generation":
+                return TranslationResult(
+                    status="clarification_required",
+                    config=None,
+                    missing_or_ambiguous_fields=["operation"],
+                    clarification_message=(
+                        f"MAC-AMP Adapter only supports operation='peptide_generation', got '{operation}'."
+                    ),
+                )
+
+            unresolved = data.get("unresolved") or []
+            if not isinstance(unresolved, list):
+                raise ValueError("'unresolved' must be a list of strings.")
+            if unresolved:
+                return TranslationResult(
+                    status="clarification_required",
+                    config=None,
+                    missing_or_ambiguous_fields=[str(item) for item in unresolved],
+                    clarification_message=(
+                        f"Cannot generate MAC-AMP configuration while request has unresolved items: {unresolved}"
+                    ),
+                )
+
+            raw_params = data.get("parameters") or {}
+            raw_inputs = data.get("inputs") or {}
+            if not isinstance(raw_params, Mapping):
+                raise ValueError("'parameters' must be a JSON object.")
+            if not isinstance(raw_inputs, Mapping):
+                raise ValueError("'inputs' must be a JSON object.")
+        else:
+            raw_params = data
+            raw_inputs = {}
+
+        # Validate input reference keys
+        unknown_inputs = set(raw_inputs.keys()) - ALLOWED_INPUT_REFS
+        if unknown_inputs:
             return TranslationResult(
                 status="clarification_required",
                 config=None,
-                missing_or_ambiguous_fields=["target_bacterium"],
-                clarification_message="Could not identify target_bacterium (bacterium/strain) in prompt.",
+                missing_or_ambiguous_fields=sorted(unknown_inputs),
+                clarification_message=(
+                    f"Unsupported input reference keys for MAC-AMP: {sorted(unknown_inputs)}. "
+                    f"Allowed inputs are: {sorted(ALLOWED_INPUT_REFS)}."
+                ),
             )
 
-        raw_target = bacterium_match.group(1).strip()
-        raw_target = re.sub(
-            r"\s+(?:using|with|for|at|in|from|dataset|iterations|steps|epochs)$",
-            "",
-            raw_target,
-            flags=re.IGNORECASE,
-        ).strip()
+        # Start with optional workflow_config_ref base overrides if supplied
+        mapped_kwargs: Dict[str, Any] = {}
+        workflow_ref = raw_inputs.get("workflow_config_ref")
+        if workflow_ref and isinstance(workflow_ref, str) and workflow_ref.strip():
+            try:
+                mapped_kwargs.update(self._load_workflow_config_overrides(workflow_ref.strip()))
+            except (FileNotFoundError, ValueError) as exc:
+                return TranslationResult(
+                    status="clarification_required",
+                    config=None,
+                    missing_or_ambiguous_fields=["workflow_config_ref"],
+                    clarification_message=str(exc),
+                )
 
-        csv_match = re.search(r"([A-Za-z0-9_./\\\-]+\.csv)", upstream_input, re.IGNORECASE)
-        epoch_match = re.search(r"(\d+)\s+(?:epochs|iterations|steps)", upstream_input, re.IGNORECASE)
-        batch_match = re.search(r"batch\s+size\s+(?:of\s+)?(\d+)", upstream_input, re.IGNORECASE)
-        temp_match = re.search(r"temperature\s+(?:of\s+)?([0-9]*\.?[0-9]+)", upstream_input, re.IGNORECASE)
+        # Map parameters (including parameters.target_organism -> target_bacterium)
+        unsupported_params: List[str] = []
+        for key, value in raw_params.items():
+            if value is None:
+                continue
+            target_field = PARAMETER_ALIASES.get(key)
+            if target_field is None:
+                unsupported_params.append(key)
+            else:
+                mapped_kwargs[target_field] = value
 
-        kwargs: Dict[str, Any] = {"target_bacterium": raw_target}
-        if csv_match:
-            kwargs["warmup_dir"] = csv_match.group(1)
-        if epoch_match:
-            kwargs["real_epoch"] = int(epoch_match.group(1))
-        if batch_match:
-            kwargs["batch_size"] = int(batch_match.group(1))
-        if temp_match:
-            kwargs["temperature"] = float(temp_match.group(1))
+        if unsupported_params:
+            return TranslationResult(
+                status="clarification_required",
+                config=None,
+                missing_or_ambiguous_fields=sorted(unsupported_params),
+                clarification_message=(
+                    f"Unsupported MAC-AMP parameter(s): {sorted(unsupported_params)}."
+                ),
+            )
 
-        config = MacAmpConfig(**kwargs)
+        # Map inputs.peptide_dataset_ref -> warmup_dir if warmup_dir not explicitly overridden
+        dataset_ref = raw_inputs.get("peptide_dataset_ref")
+        if dataset_ref and isinstance(dataset_ref, str) and dataset_ref.strip():
+            ref_str = dataset_ref.strip()
+            resolved_ds = self.resource_registry.get(ref_str, ref_str)
+            if not str(resolved_ds).lower().endswith(".csv"):
+                resolved_ds = f"{resolved_ds}.csv"
+            mapped_kwargs.setdefault("warmup_dir", str(resolved_ds))
+
+        # Map inputs.model_ref -> model_path if model_path not explicitly overridden
+        model_ref = raw_inputs.get("model_ref")
+        if model_ref and isinstance(model_ref, str) and model_ref.strip():
+            ref_str = model_ref.strip()
+            resolved_model = self.resource_registry.get(ref_str, ref_str)
+            mapped_kwargs.setdefault("model_path", str(resolved_model))
+
+        # Check required target_bacterium
+        target_val = mapped_kwargs.get("target_bacterium")
+        if not target_val or not str(target_val).strip():
+            return TranslationResult(
+                status="clarification_required",
+                config=None,
+                missing_or_ambiguous_fields=["target_organism"],
+                clarification_message=(
+                    "Missing required target organism ('parameters.target_organism'). "
+                    f"Supported MAC-AMP organisms are: {', '.join(SUPPORTED_BACTERIA)}."
+                ),
+            )
+
+        # Validate with MacAmpConfig (auto-resolves bacterium_code, warmup_dir, ref_pdb_path)
+        try:
+            config = MacAmpConfig(**mapped_kwargs)
+        except ValidationError as exc:
+            err_fields: List[str] = []
+            messages: List[str] = []
+            for err in exc.errors():
+                loc = ".".join(str(part) for part in err.get("loc", ())) or "target_organism"
+                if loc == "target_bacterium":
+                    loc = "target_organism"
+                err_fields.append(loc)
+                messages.append(err.get("msg", str(exc)))
+            return TranslationResult(
+                status="clarification_required",
+                config=None,
+                missing_or_ambiguous_fields=list(dict.fromkeys(err_fields)),
+                clarification_message="; ".join(messages),
+            )
+
+        # Check required resources on disk when configured or when explicit file paths are given
+        missing_resources = self._verify_required_resources(config, raw_inputs)
+        if missing_resources:
+            return TranslationResult(
+                status="clarification_required",
+                config=None,
+                missing_or_ambiguous_fields=missing_resources,
+                clarification_message=(
+                    f"Required MAC-AMP resource(s) do not exist: {', '.join(missing_resources)}."
+                ),
+            )
+
         return TranslationResult(status="success", config=config)
-
-    # OpenAI Structured Outputs Call (`translate`) 
-    def translate(self, upstream_input: str) -> TranslationResult:
-        """
-        Sends the plain-English request to OpenAI with `response_format=TranslationResult`.
-        OpenAI guarantees the response adheres to the `TranslationResult` Pydantic schema.
-        """
-        if self.dry_run:
-            return self._dry_run_translate(upstream_input)
-
-        assert self.client is not None
-        completion = self.client.beta.chat.completions.parse(
-            model=self.model,
-            temperature=0.0,  # Deterministic extraction
-            max_completion_tokens=self.max_completion_tokens,
-            messages=[
-                {"role": "system", "content": self._build_system_prompt()},
-                {"role": "user", "content": upstream_input},
-            ],
-            response_format=TranslationResult,
-        )
-
-        result = completion.choices[0].message.parsed
-        if result is None:
-            raise RuntimeError(
-                f"Translation refused by model: {completion.choices[0].message.refusal}"
-            )
-        return result
 
     # Downstream Layer Handoff (`translate_for_downstream`)
     def translate_for_downstream(
         self,
-        upstream_input: str,
+        upstream_input: Union[str, Path, Mapping[str, Any]],
         save_to_specs: bool = True,
         output_path: Optional[Union[str, Path]] = None,
     ) -> str:
         """
-        End-to-end entrypoint called by your application or CLI:
-          1. Calls `translate(upstream_input)` to parse and validate the prompt.
-          2. Raises a clear error if `target_bacterium` was missing (`clarification_required`).
-          3. Converts the validated model into a Hydra `config.yaml` string.
-          4. Saves `config.yaml` and `spec.md` into `specs/<NNN-bacterium>/`.
+        End-to-end entrypoint called by the platform pipeline or CLI:
+          1. Calls `translate(upstream_input)` on the validated 6-field JSON.
+          2. Raises a clear ValueError if `status != "success"` (e.g., missing target_organism,
+             unsupported bacterium, or missing dataset/model resource).
+          3. Converts the validated `MacAmpConfig` into a Hydra `config.yaml` string.
+          4. Optionally saves `config.yaml` and `spec.md` into `specs/<NNN-bacterium>/`.
           5. Returns the Hydra YAML string ready for MAC-AMP_v1.
         """
         result = self.translate(upstream_input)
@@ -241,7 +520,12 @@ class SpecKitTranslator:
         yaml_content = _dict_to_hydra_yaml(payload)
 
         if save_to_specs:
-            self._persist_spec_kit_artifacts(upstream_input, payload, yaml_content)
+            source_summary = (
+                json.dumps(dict(upstream_input), ensure_ascii=False)
+                if isinstance(upstream_input, Mapping)
+                else str(upstream_input)
+            )
+            self._persist_spec_kit_artifacts(source_summary, payload, yaml_content)
 
         if output_path:
             out_file = Path(output_path)
@@ -252,10 +536,10 @@ class SpecKitTranslator:
 
     # Spec-Kit Artifact Persistence (`specs/<NNN-bacterium>/`)
     def _persist_spec_kit_artifacts(
-        self, upstream_input: str, payload: Dict[str, Any], yaml_content: str
+        self, source_request: str, payload: Dict[str, Any], yaml_content: str
     ) -> Path:
         """
-        Creates a sequentially numbered folder under `specs/` (e.g., `specs/004-escherichia-coli/`)
+        Creates a sequentially numbered folder under `specs/` (e.g., `specs/005-escherichia-coli/`)
         and writes two files:
           - `config.yaml`: The exact Hydra config file for MAC-AMP_v1.
           - `spec.md`: The Spec-Kit human-readable audit record of the run.
@@ -273,32 +557,35 @@ class SpecKitTranslator:
         (run_dir / "config.yaml").write_text(yaml_content, encoding="utf-8")
 
         # 2. Write spec.md audit log
-        mode_label = "DRY-RUN (0 Tokens)" if self.dry_run else f"OpenAI ({self.model})"
         spec_md = (
             f"# Run Specification: {run_dir.name}\n\n"
-            f"- **Source User Prompt**: `{upstream_input}`\n"
-            f"- **Translation Mode**: `{mode_label}`\n"
+            f"- **Source Validated JSON**: `{source_request}`\n"
+            f"- **Translation Mode**: `Structured JSON Adapter (0 LLM Calls)`\n"
             f"- **Validation Status**: `VALID (MAC-AMP_v1 Hydra YAML)`\n\n"
             f"## Target Bacterium & Auto-Resolved MAC-AMP_v1 Paths\n"
             f"- **`target_bacterium`**: `{payload['target_bacterium']}`\n"
             f"- **`bacterium_code`**: `{payload['bacterium_code']}`\n"
             f"- **`warmup_dir`**: `{payload['warmup_dir']}`\n"
             f"- **`ref_pdb_path`**: `{payload['ref_pdb_path']}`\n"
+            f"- **`model_path`**: `{payload['model_path']}`\n"
         )
         (run_dir / "spec.md").write_text(spec_md, encoding="utf-8")
         return run_dir
 
 
+# Alias for intuitive naming in the pipeline
+MacAmpAdapter = SpecKitTranslator
+
 
 # Command-Line & Stdin Pipe Entrypoint (`main`)
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Spec-Kit NLP-to-Configuration translation layer for CLMFAP/MAC-AMP_v1."
+        description="MAC-AMP Input Adapter: Translates validated 6-field JSON into MAC-AMP_v1 Hydra config.yaml."
     )
     parser.add_argument(
-        "prompt",
+        "json_input",
         nargs="?",
-        help="Plain-English input string from upstream layer (or pass via stdin).",
+        help="Validated 6-field JSON string or path to a .json file (or pass via stdin).",
     )
     parser.add_argument(
         "-o",
@@ -313,26 +600,33 @@ def main() -> None:
         help="Do not create a new folder under specs/.",
     )
     parser.add_argument(
-        "--dry-run",
+        "--resource-root",
+        type=str,
+        default=None,
+        help="Optional root directory to verify that dataset, model, and PDB resources exist on disk.",
+    )
+    parser.add_argument(
+        "--verify-resources",
         action="store_true",
-        help="Run locally using 0 OpenAI tokens (no API key required) to test layer integration.",
+        help="Verify that all referenced dataset paths, model files, and resources exist on disk.",
     )
     args = parser.parse_args()
 
-    # Accept input either as a command-line string argument or piped via stdin
-    upstream_text = args.prompt or sys.stdin.read().strip()
+    upstream_text = args.json_input or sys.stdin.read().strip()
     if not upstream_text:
-        print("Error: No input provided via argument or stdin.", file=sys.stderr)
+        print("Error: No JSON input provided via argument or stdin.", file=sys.stderr)
         sys.exit(1)
 
     try:
-        translator = SpecKitTranslator(dry_run=args.dry_run)
-        downstream_yaml = translator.translate_for_downstream(
+        adapter = SpecKitTranslator(
+            resource_root=args.resource_root,
+            verify_resources=args.verify_resources,
+        )
+        downstream_yaml = adapter.translate_for_downstream(
             upstream_input=upstream_text,
             save_to_specs=not args.no_spec_save,
             output_path=args.output,
         )
-        # Print the Hydra config.yaml content to stdout
         print(downstream_yaml)
     except Exception as exc:
         print(f"status: error\nmessage: {exc}", file=sys.stderr)
