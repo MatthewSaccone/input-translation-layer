@@ -1,0 +1,44 @@
+defaults:
+  - _self_
+  - env: test_generator
+  - override hydra/launcher: local
+  - override hydra/output: local
+
+hydra:
+  job:
+    chdir: True
+
+# Target Bacterium & Dataset Paths
+target_bacterium: "Staphylococcus_aureus"
+bacterium_code: "SA"
+warmup_dir: "../Generation_Module/data/warmup/warmup_AMP_Staphylococcus_aureus.csv"
+ref_pdb_path: "/data/AMP_Staphylococcus_aureus_811_new/ref_pdbs"
+
+# env
+task: test_amp_generator_task
+env_name: test_amp_generator_env
+
+# LLM parameters
+model: gpt-5
+temperature: 1.0
+suffix: GPT
+
+# PPO Training Parameters
+num_samples: 32
+sample: 3
+max_seq_len: 50
+
+# Control Parameters
+skip_independent_reviewer: ""
+real_epoch: 20
+sand_box_epoch: 5
+max_length: 40
+drift_wordlist: "Null"
+ablation_mode: 1
+experiment: "baseline_api"
+default_sign: -1
+log_path: my_test_tag
+real_train_stage_iteration: 5
+sandbox_iteration: 3
+reward_sample_num: 3
+batch_size: 16
