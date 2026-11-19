@@ -561,3 +561,107 @@ Until that approval, numeric constraints will be preserved as concise `unresolve
 ```
 
 **Known limitations:** Numeric constraints are still in `unresolved` unless the shared nested JSON format is approved; a user-provided algorithm name must not be silently ignored; the narrow routing repair cannot guarantee correct interpretation for every phrasing; the scorer checks selected expected fields, not scientific viability.
+
+---
+
+## 16. Three-component integration patch — 2026-11-18
+
+**Scope:** LLM interpreter, core schema validator, and MAC-AMP configuration adapter only. The RL-Diffusion adapter is not implemented or touched. The upload's `.env`, `.git`, `.venv`, caches, and local evaluation results were intentionally not read or included in the patch.
+
+### Shared contract and validation
+
+- Retained the six-field version 1.0 request: `schema_version`, `algorithm_id`, `operation`, `parameters`, `inputs`, `unresolved`.
+- Aligned the validator's approved MAC-AMP parameter names with the adapter's **researcher-facing tuning subset**: `target_organism`, `num_samples`, `sample`, `max_seq_len`, `max_length`, `batch_size`, `real_epoch`, `sand_box_epoch`, `real_train_stage_iteration`, `sandbox_iteration`, `reward_sample_num`, `temperature`, `ablation_mode`, `experiment`, `skip_independent_reviewer`.
+- Kept low-level filesystem paths, model internals, and runtime settings out of the researcher-facing parameter list. Their defaults and mapping remain adapter responsibilities.
+- MAC-AMP `peptide_dataset_ref`, `model_ref`, and `workflow_config_ref` are now **optional at interpretation and schema-validation time** because the adapter supports fallback resource locations. Before scientific execution, verified resource resolution must be mandatory. This is a **group contract decision requiring confirmation from the validator and MAC-AMP owners**.
+- Strengthened validation for unknown top-level/input keys, unhashable or malformed algorithm selectors, scalar types/ranges, and molecular objective shapes. RL-Diffusion readiness rules remain unchanged; its adapter is not integrated.
+- `ValidationReport.valid` means **structurally valid**, not scientifically executable. `unresolved` still blocks progress.
+
+### LLM interpreter
+
+- Added optional structured `MacAmpSettings` fields for explicit user-supplied tuning values. No hardcoded defaults are filled by the LLM.
+- Added field descriptions and examples to the LLM instructions, and updated the MAC-AMP capability catalog.
+- Uses the validator's approved MAC-AMP field set to decide what can be placed into `parameters`; unsupported tuning requests are preserved rather than silently discarded.
+- Existing automatic algorithm selection and numerical-objective compatibility switch remain in place.
+
+### MAC-AMP adapter
+
+- Requires the shared six-field envelope instead of accepting raw native configuration objects; no extra LLM call.
+- Filesystem resource roots are constrained to a specified directory in verification mode; registered references outside that root are rejected. Native `/data/...` template references are remapped within the resource root for local checks.
+- Workflow config references must be registered before the adapter reads their contents. In verified mode, dataset/model reference IDs must also be present in the trusted registry.
+- Strengthened file-versus-directory checks and escaped YAML string values for correct quoting. File existence checks **do not verify model checkpoint compatibility, scientific predictors, dataset content, or actual ability to run MAC-AMP**.
+- The adapter's legacy unverified preview may still synthesize a `.csv` filename from an unregistered resource ID; this preview must never be treated as runnable.
+
+### New integration interface
+
+`core.pipeline.prepare_mac_amp_request(request, resource_root=None, resource_registry=None, verify_resources=False)` validates the structured request, calls the MAC-AMP adapter, and returns a `PipelineResult` with one of:
+
+- `invalid_request`: core schema or required interpretation fields invalid;
+- `adapter_rejected`: MAC-AMP-specific check or resource check failed;
+- `configuration_error`: invalid verification setup;
+- `config_preview_unverified`: YAML produced, but resources not checked;
+- `resources_found_not_execution_verified`: checked filesystem resources exist, but scientific execution has NOT been verified;
+- `adapter_not_implemented`: RL-Diffusion adapter has not been integrated.
+
+No scientific models are run and the integration function does not write files.
+
+### Offline validation results
+
+- **77 tests passed** in the local authoring environment using `python -m pytest -q`.
+- `python -m compileall -q core llm adapters/mac_amp tests` passed.
+- New tests cover LLM MAC-AMP tuning extraction, schema-validation types, malformed inputs, end-to-end configuration preview, verified/missing resources, registration checks, sandbox path escape prevention, and RL-Diffusion not-yet-integrated status.
+- **Real OpenAI API and native MAC-AMP execution were not tested in this patch.** Earlier 10/10 real-LLM results belong to the earlier model/extraction implementation; re-evaluation is required after changing prompts and extraction shape.
+
+### Running locally (Windows PowerShell, repository root)
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m pytest -q
+.\.venv\Scripts\python.exe -m llm.interpreter --demo
+```
+
+Preview a validated MAC-AMP request without running the scientific model:
+
+```powershell
+.\.venv\Scripts\python.exe -c "from core.pipeline import prepare_mac_amp_request; import json; r=json.load(open('examples/mac_amp_request.json')); x=prepare_mac_amp_request(r); print(x.status); print(x.yaml or x.issues)"
+```
+
+### Items requiring group confirmation or subsequent work
+
+1. **Validator + adapter owners:** confirm the optional-MAC-resource-reference policy, approved native tuning fields, and what qualifies as a truly ready-to-run job.
+2. **MAC-AMP owner/Gen:** verify supported organisms, model checkpoints, dataset CSV requirements, evaluation tool dependencies, and native Hydra parameter wiring. Filesystem path checks alone are insufficient.
+3. **Platform integration:** provide real trusted resource registry entries, mapping IDs to approved local files/directories. Do not use raw user-supplied paths as trusted IDs.
+4. **LLM owner:** rerun paid real-model evaluation after the extraction-model change, and inspect each output; a mock test pass is not evidence of live model accuracy.
+5. **RL-Diffusion owner:** integrate separately once ready. No changes to that adapter were made.
+
+---
+
+## 17. Natural-language end-to-end preview runner — 2026-11-18
+
+**Scope:** Add a demonstrable natural-language → LLM → validator → MAC-AMP adapter → YAML-preview path. RL-Diffusion remains unimplemented in this pipeline; scientific models are never executed.
+
+### Added files
+
+- `core/natural_language_pipeline.py`: `prepare_from_prompt()` calls `interpret_user_prompt()` exactly once, validates the resulting six-field JSON through `core.validator`, and passes accepted MAC-AMP requests to `prepare_mac_amp_request()`. Returns both the structured request and the pipeline result. If selected RL-Diffusion is valid but its adapter is unfinished, returns `adapter_not_implemented`.
+- `run_mac_amp_pipeline.py`: command-line runner with a genuine API mode and a clearly labeled fixed `--demo` fixture. Prints translated JSON, status, errors, and generated YAML preview without saving files or invoking scientific algorithms.
+- `tests/test_natural_language_pipeline.py`: six deterministic regression tests covering MAC-AMP parameter forwarding, missing organism, ambiguity blocking, RL-Diffusion deferred dispatch, invalid tuning, and no fabricated resource IDs.
+
+### Windows PowerShell commands
+
+From the repository root (with `.venv` configured):
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q
+.\.venv\Scripts\python.exe run_mac_amp_pipeline.py --demo
+.\.venv\Scripts\python.exe run_mac_amp_pipeline.py "Generate antimicrobial peptides targeting E. coli with batch size 16"
+```
+
+The final command calls the configured OpenAI API and may incur charges. API credentials must remain local in `.env`; never paste them into logs or commit them. Do **not** interpret `--demo` as a genuine language-understanding evaluation—it uses a fixed fixture.
+
+### Verified tests and limitations
+
+- **83/83 offline tests passed** in the authoring environment (prior suite 77 + 6 new tests).
+- Fixed offline CLI demonstration returned `config_preview_unverified` and printed MAC-AMP YAML.
+- **Live API extraction for this updated end-to-end runner has not yet been executed here.** Test it locally and inspect the entire JSON, not only the status.
+- `config_preview_unverified` means only that a syntactically generated preview exists. It does not verify file existence, compatibility, scientific effectiveness, or the ability to execute MAC-AMP.
+- The resource-verified mode remains available to the lower-level `prepare_mac_amp_request()` interface. No source code from the RL-Diffusion adapter was modified.

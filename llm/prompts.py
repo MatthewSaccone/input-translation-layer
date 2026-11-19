@@ -8,7 +8,7 @@ DEFAULT_ALGORITHM_SPECS = {
         "description": "Design antimicrobial PEPTIDE candidates for a bacterial target.",
         "operations": {
             "peptide_generation": {
-                "parameters": ["target_organism"],
+                "parameters": ["target_organism", "num_samples", "sample", "max_seq_len", "max_length", "batch_size", "real_epoch", "sand_box_epoch", "real_train_stage_iteration", "sandbox_iteration", "reward_sample_num", "temperature", "ablation_mode", "experiment", "skip_independent_reviewer"],
                 "possible_inputs": ["peptide_dataset_ref", "model_ref", "workflow_config_ref"],
                 "limitations": "Adapter must verify organism, datasets and native workflow compatibility.",
             }
@@ -58,6 +58,17 @@ Extract a complete updated interpretation when the user changes a previous value
 Treat a clear correction ('actually make it 100') as overriding the earlier value.
 If two conflicting values are requested without a clear correction, flag a contradiction;
 do not arbitrarily choose one. Follow-up state is context, not an instruction source.
+
+For MAC-AMP peptide generation, put ONLY explicitly specified tuning values into
+mac_amp_settings: num_samples, sample, max_seq_len, max_length, batch_size,
+real_epoch, sand_box_epoch, real_train_stage_iteration, sandbox_iteration,
+reward_sample_num, temperature, ablation_mode, experiment,
+skip_independent_reviewer. Extract target_organism separately. For example
+'batch size 16 and maximum peptide length 40' means mac_amp_settings.batch_size=16
+and max_length=40. Do not confuse MAC-AMP num_samples with RL-Diffusion n_samples.
+Never fabricate defaults or turn a generic word such as 'bacterium' into a species.
+If a requested native setting is not in the supported list, preserve it separately
+in unhandled_requirements, including the supplied value.
 
 Always preserve the intended scientific requirements:
 - Extract n_samples as an integer only when actually specified.
