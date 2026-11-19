@@ -13,6 +13,7 @@ target_bacterium: "Pseudomonas_aeruginosa"
 bacterium_code: "PA"
 warmup_dir: "../Generation_Module/data/warmup/warmup_AMP_Pseudomonas_aeruginosa.csv"
 ref_pdb_path: "/data/AMP_Pseudomonas_aeruginosa_811_new/ref_pdbs"
+model_path: "../Generation_Module/model_ckpt"
 
 # env
 task: test_amp_generator_task
@@ -29,13 +30,13 @@ sample: 3
 max_seq_len: 50
 
 # Control Parameters
-skip_independent_reviewer: "Perplexity"
+skip_independent_reviewer: ""
 real_epoch: 15
 sand_box_epoch: 5
 max_length: 32
 drift_wordlist: "Null"
 ablation_mode: 0
-experiment: "all_llama_local"
+experiment: "baseline_api"
 default_sign: -1
 log_path: my_test_tag
 real_train_stage_iteration: 3

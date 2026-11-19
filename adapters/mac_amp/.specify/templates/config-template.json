@@ -3,6 +3,7 @@
   "bacterium_code": "EC",
   "warmup_dir": "../Generation_Module/data/warmup/warmup_AMP_<Target_Bacterium>.csv",
   "ref_pdb_path": "/data/AMP_<Target_Bacterium>_811_new/ref_pdbs",
+  "model_path": "../Generation_Module/model_ckpt",
   "task": "test_amp_generator_task",
   "env_name": "test_amp_generator_env",
   "model": "gpt-5",
