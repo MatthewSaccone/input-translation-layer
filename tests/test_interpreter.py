@@ -324,3 +324,24 @@ def test_e_coli_abbreviation_preserved_as_user_wrote_it():
     fake = FakeProvider(intent(algorithm_id="mac_amp", operation="peptide_generation", target_organism="E. coli"))
     result = interpret_user_prompt("Generate antimicrobial peptides targeting E. coli", provider=fake)
     assert result["parameters"]["target_organism"] == "E. coli"
+
+
+def test_new_mac_amp_tuning_fields_survive_llm_conversion():
+    from llm.interpreter import MacAmpSettings
+    extracted = intent(
+        algorithm_id="mac_amp", operation="peptide_generation", target_organism="E. coli",
+        mac_amp_settings=MacAmpSettings(real_epoch=20, batch_size=16, max_length=40),
+    )
+    result = to_translation_request(extracted)
+    assert result["parameters"] == {
+        "target_organism": "E. coli", "real_epoch": 20, "batch_size": 16, "max_length": 40,
+    }
+    assert not result["unresolved"]
+
+
+def test_mac_amp_tuning_is_not_silently_assigned_to_rl_diffusion():
+    from llm.interpreter import MacAmpSettings
+    extracted = intent(mac_amp_settings=MacAmpSettings(batch_size=16))
+    result = to_translation_request(extracted)
+    assert "batch_size" not in result["parameters"]
+    assert "mac_amp_settings_not_supported_for_selected_operation" in result["unresolved"]

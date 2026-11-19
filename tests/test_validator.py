@@ -43,9 +43,6 @@ def test_mac_amp_requires_target_and_resources():
     })
     assert set(report.errors) == {
         "parameters.target_organism must be a non-empty string",
-        "inputs.peptide_dataset_ref must be a non-empty string",
-        "inputs.model_ref must be a non-empty string",
-        "inputs.workflow_config_ref must be a non-empty string",
     }
 
 
@@ -65,3 +62,41 @@ def test_validator_does_not_mutate_request():
 def test_boolean_is_not_an_integer_sample_count():
     request = sample_request(parameters={"n_samples": True})
     assert not is_valid_translation_request(request)
+
+
+def test_mac_amp_defaults_are_not_forced_into_researcher_request():
+    request = {
+        "schema_version": "1.0", "algorithm_id": "mac_amp",
+        "operation": "peptide_generation", "parameters": {"target_organism": "E. coli", "batch_size": 16, "max_length": 40},
+        "inputs": {}, "unresolved": [],
+    }
+    assert validate_translation_request(request).valid
+
+
+def test_malformed_unhashable_algorithm_returns_report():
+    report = validate_translation_request(sample_request(algorithm_id=["mac_amp"]))
+    assert not report.valid
+    assert "algorithm_id is missing or unsupported" in report.errors
+
+
+def test_rejects_extra_input_keys_and_top_level_fields():
+    report = validate_translation_request(sample_request(inputs={"model_ref": "ref", "unexpected": "path"}, extra="bad"))
+    assert not report.valid
+    assert "unsupported input: unexpected" in report.errors
+    assert "unsupported top-level field: extra" in report.errors
+
+
+def test_mac_amp_parameter_types():
+    for invalid in (True, 0, -2, "16"):
+        report = validate_translation_request({
+            "schema_version": "1.0", "algorithm_id": "mac_amp", "operation": "peptide_generation",
+            "parameters": {"target_organism": "E. coli", "batch_size": invalid},
+            "inputs": {}, "unresolved": [],
+        })
+        assert not report.valid
+
+
+def test_invalid_objective_structure_rejected():
+    for objectives in ({"qed": "bad"}, {"wrong": "maximize"}, {"qed": {"operator": ">=", "value": 2, "upper_value": None, "unit": None}}):
+        report = validate_translation_request(sample_request(parameters={"requested_objectives": objectives}))
+        assert not report.valid

@@ -85,20 +85,20 @@ def _dict_to_hydra_yaml(payload: Dict[str, Any]) -> str:
         "    chdir: True",
         "",
         "# Target Bacterium & Dataset Paths",
-        f'target_bacterium: "{payload["target_bacterium"]}"',
-        f'bacterium_code: "{payload["bacterium_code"]}"',
-        f'warmup_dir: "{payload["warmup_dir"]}"',
-        f'ref_pdb_path: "{payload["ref_pdb_path"]}"',
-        f'model_path: "{payload["model_path"]}"',
+        f'target_bacterium: {json.dumps(str(payload["target_bacterium"]), ensure_ascii=False)}',
+        f'bacterium_code: {json.dumps(str(payload["bacterium_code"]), ensure_ascii=False)}',
+        f'warmup_dir: {json.dumps(str(payload["warmup_dir"]), ensure_ascii=False)}',
+        f'ref_pdb_path: {json.dumps(str(payload["ref_pdb_path"]), ensure_ascii=False)}',
+        f'model_path: {json.dumps(str(payload["model_path"]), ensure_ascii=False)}',
         "",
         "# env",
-        f'task: {payload["task"]}',
-        f'env_name: {payload["env_name"]}',
+        f'task: {json.dumps(str(payload["task"]), ensure_ascii=False)}',
+        f'env_name: {json.dumps(str(payload["env_name"]), ensure_ascii=False)}',
         "",
         "# LLM parameters",
-        f'model: {payload["model"]}',
+        f'model: {json.dumps(str(payload["model"]), ensure_ascii=False)}',
         f'temperature: {payload["temperature"]}',
-        f'suffix: {payload["suffix"]}',
+        f'suffix: {json.dumps(str(payload["suffix"]), ensure_ascii=False)}',
         "",
         "# PPO Training Parameters",
         f'num_samples: {payload["num_samples"]}',
@@ -106,13 +106,13 @@ def _dict_to_hydra_yaml(payload: Dict[str, Any]) -> str:
         f'max_seq_len: {payload["max_seq_len"]}',
         "",
         "# Control Parameters",
-        f'skip_independent_reviewer: "{payload["skip_independent_reviewer"]}"',
+        f'skip_independent_reviewer: {json.dumps(str(payload["skip_independent_reviewer"]), ensure_ascii=False)}',
         f'real_epoch: {payload["real_epoch"]}',
         f'sand_box_epoch: {payload["sand_box_epoch"]}',
         f'max_length: {payload["max_length"]}',
-        f'drift_wordlist: "{payload["drift_wordlist"]}"',
+        f'drift_wordlist: {json.dumps(str(payload["drift_wordlist"]), ensure_ascii=False)}',
         f'ablation_mode: {payload["ablation_mode"]}',
-        f'experiment: "{payload["experiment"]}"',
+        f'experiment: {json.dumps(str(payload["experiment"]), ensure_ascii=False)}',
         f'default_sign: {payload["default_sign"]}',
         f'log_path: {payload["log_path"]}',
         f'real_train_stage_iteration: {payload["real_train_stage_iteration"]}',
@@ -198,26 +198,40 @@ class SpecKitTranslator:
         )
 
     def _resolve_resource_path(self, ref_or_path: str, default_suffix: str = "") -> Path:
-        """Maps a logical reference ID or file path to a concrete filesystem Path."""
+        """Resolve registered references or native default paths, never escape resource_root.
+
+        Absolute paths in resource_registry are accepted only inside resource_root
+        when a root is configured. `/data/...` native templates are remapped to
+        resource_root/data/... for local test/deployment environments.
+        """
         mapped = self.resource_registry.get(ref_or_path, ref_or_path)
-        p = Path(mapped)
-        if not p.is_absolute() and self.resource_root is not None:
-            # Handle relative paths starting with ../ or /data/ inside a resource_root sandbox
-            cleaned = str(mapped).replace("\\", "/")
-            while cleaned.startswith("../"):
-                cleaned = cleaned[3:]
-            cleaned = cleaned.lstrip("/")
-            candidate = self.resource_root / cleaned
-            if candidate.exists():
-                return candidate
-            if default_suffix and not cleaned.lower().endswith(default_suffix):
-                with_suffix = self.resource_root / f"{cleaned}{default_suffix}"
-                if with_suffix.exists():
-                    return with_suffix
-            return candidate
-        if str(mapped).startswith("/data/") and self.resource_root is not None:
-            return self.resource_root / str(mapped).lstrip("/")
-        return p
+        raw = str(mapped).replace("\\", "/")
+        if self.resource_root is None:
+            return Path(raw)
+        root = self.resource_root.resolve()
+        if raw.startswith("/data/"):
+            candidate = root / raw.lstrip("/")
+        else:
+            value = Path(raw)
+            if value.is_absolute():
+                candidate = value
+            else:
+                # Native defaults use paths relative to the MAC-AMP workspace.
+                # Never normalize arbitrary user references containing traversal.
+                if any(part == ".." for part in value.parts):
+                    if ref_or_path not in self.resource_registry and not raw.startswith("../Generation_Module/"):
+                        raise ValueError(f"Unapproved resource traversal: {ref_or_path}")
+                    if raw.startswith("../Generation_Module/"):
+                        value = Path(raw[3:])
+                    else:
+                        raise ValueError(f"Unapproved resource traversal: {ref_or_path}")
+                candidate = root / value
+        candidate = candidate.resolve()
+        if not candidate.is_relative_to(root):
+            raise ValueError(f"Resource is outside configured root: {ref_or_path}")
+        if default_suffix and not candidate.exists() and candidate.suffix.lower() != default_suffix:
+            candidate = Path(str(candidate) + default_suffix)
+        return candidate
 
     def _load_workflow_config_overrides(self, workflow_ref: str) -> Dict[str, Any]:
         """Loads optional MAC-AMP parameter overrides from a workflow_config_ref JSON/YAML file."""
@@ -297,17 +311,17 @@ class SpecKitTranslator:
         model_ref = inputs.get("model_ref")
         if model_ref:
             m_path = self._resolve_resource_path(str(model_ref))
-            if self.verify_resources and not m_path.exists():
+            if self.verify_resources and not m_path.is_dir():
                 missing.append(f"model_ref ({model_ref})")
         elif self.verify_resources and config.model_path:
             mp = self._resolve_resource_path(config.model_path)
-            if not mp.exists():
+            if not mp.is_dir():
                 missing.append(f"model_path ({config.model_path})")
 
         # 4. Check reference PDB directory when full resource verification is active
         if self.verify_resources and config.ref_pdb_path:
             pdb_path = self._resolve_resource_path(config.ref_pdb_path)
-            if not pdb_path.exists():
+            if not pdb_path.is_dir():
                 missing.append(f"ref_pdb_path ({config.ref_pdb_path})")
 
         return missing
@@ -328,6 +342,12 @@ class SpecKitTranslator:
         )
 
         if is_six_field:
+            if set(data) != {"schema_version", "algorithm_id", "operation", "parameters", "inputs", "unresolved"}:
+                return TranslationResult(
+                    status="clarification_required", config=None,
+                    missing_or_ambiguous_fields=["schema_fields"],
+                    clarification_message="The MAC-AMP adapter requires exactly the six shared JSON fields.",
+                )
             schema_version = data.get("schema_version", "1.0")
             if schema_version != "1.0":
                 return TranslationResult(
@@ -379,8 +399,7 @@ class SpecKitTranslator:
             if not isinstance(raw_inputs, Mapping):
                 raise ValueError("'inputs' must be a JSON object.")
         else:
-            raw_params = data
-            raw_inputs = {}
+            raise ValueError("MAC-AMP adapter requires the shared six-field request, not a raw native config")
 
         # Validate input reference keys
         unknown_inputs = set(raw_inputs.keys()) - ALLOWED_INPUT_REFS
@@ -399,6 +418,13 @@ class SpecKitTranslator:
         mapped_kwargs: Dict[str, Any] = {}
         workflow_ref = raw_inputs.get("workflow_config_ref")
         if workflow_ref and isinstance(workflow_ref, str) and workflow_ref.strip():
+            # Never read an arbitrary filesystem path from the LLM request.
+            if workflow_ref.strip() not in self.resource_registry:
+                return TranslationResult(
+                    status="clarification_required", config=None,
+                    missing_or_ambiguous_fields=["workflow_config_ref"],
+                    clarification_message="Workflow config reference must be registered before use.",
+                )
             try:
                 mapped_kwargs.update(self._load_workflow_config_overrides(workflow_ref.strip()))
             except (FileNotFoundError, ValueError) as exc:
@@ -434,8 +460,16 @@ class SpecKitTranslator:
         dataset_ref = raw_inputs.get("peptide_dataset_ref")
         if dataset_ref and isinstance(dataset_ref, str) and dataset_ref.strip():
             ref_str = dataset_ref.strip()
+            if self.verify_resources and ref_str not in self.resource_registry:
+                return TranslationResult(
+                    status="clarification_required", config=None,
+                    missing_or_ambiguous_fields=["peptide_dataset_ref"],
+                    clarification_message="Dataset reference must be registered before verification.",
+                )
             resolved_ds = self.resource_registry.get(ref_str, ref_str)
-            if not str(resolved_ds).lower().endswith(".csv"):
+            # Legacy unverified fixtures use logical IDs; never guess extensions
+            # for registered paths or verified execution requests.
+            if not self.verify_resources and ref_str not in self.resource_registry and not str(resolved_ds).lower().endswith(".csv"):
                 resolved_ds = f"{resolved_ds}.csv"
             mapped_kwargs.setdefault("warmup_dir", str(resolved_ds))
 
@@ -443,6 +477,12 @@ class SpecKitTranslator:
         model_ref = raw_inputs.get("model_ref")
         if model_ref and isinstance(model_ref, str) and model_ref.strip():
             ref_str = model_ref.strip()
+            if self.verify_resources and ref_str not in self.resource_registry:
+                return TranslationResult(
+                    status="clarification_required", config=None,
+                    missing_or_ambiguous_fields=["model_ref"],
+                    clarification_message="Model reference must be registered before verification.",
+                )
             resolved_model = self.resource_registry.get(ref_str, ref_str)
             mapped_kwargs.setdefault("model_path", str(resolved_model))
 

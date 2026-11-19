@@ -13,6 +13,7 @@ from typing import Any, Literal, Protocol
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from llm.prompts import DEFAULT_ALGORITHM_SPECS, SYSTEM_INSTRUCTIONS, build_user_input
+from core.validator import MAC_AMP_ALLOWED_PARAMETERS
 
 Algorithm = Literal["mac_amp", "rl_diffusion"]
 Operation = Literal["peptide_generation", "sample", "train"]
@@ -50,6 +51,28 @@ class NumericalGoal(BaseModel):
         return value
 
 
+class MacAmpSettings(BaseModel):
+    """MAC-AMP native tuning values expressly specified by the researcher.
+
+    Omitted values remain None; the MAC-AMP adapter applies verified defaults.
+    """
+    model_config = ConfigDict(extra="forbid")
+    num_samples: int | None = None
+    sample: int | None = None
+    max_seq_len: int | None = None
+    max_length: int | None = None
+    batch_size: int | None = None
+    real_epoch: int | None = None
+    sand_box_epoch: int | None = None
+    real_train_stage_iteration: int | None = None
+    sandbox_iteration: int | None = None
+    reward_sample_num: int | None = None
+    temperature: float | None = None
+    ablation_mode: int | None = None
+    experiment: str | None = None
+    skip_independent_reviewer: str | None = None
+
+
 class ExtractedIntent(BaseModel):
     """Strict response shape used with the LLM API.
 
@@ -69,6 +92,7 @@ class ExtractedIntent(BaseModel):
     ambiguities: list[str] = Field(default_factory=list)
     unhandled_requirements: list[str] = Field(default_factory=list)
     numerical_goals: list[NumericalGoal] = Field(default_factory=list)
+    mac_amp_settings: MacAmpSettings | None = None
 
 
 class IntentProvider(Protocol):
@@ -148,6 +172,13 @@ def to_translation_request(
                 "an organism", "organism", "a bacterial species", "unknown",
             }:
                 params["target_organism"] = organism
+        if intent.mac_amp_settings is not None:
+            for key, value in intent.mac_amp_settings.model_dump(exclude_none=True).items():
+                # Core validator is the source of truth for approved settings.
+                if key in MAC_AMP_ALLOWED_PARAMETERS:
+                    params[key] = value
+                else:
+                    unresolved.append(f"mac_amp_parameter_requires_schema_approval:{key}={value}")
     elif algorithm == "rl_diffusion" and operation == "sample":
         if intent.n_samples is not None:
             if intent.n_samples <= 0:
@@ -201,6 +232,8 @@ def to_translation_request(
 
     # If a result was requested for a different operation, never pretend that
     # it was translated. Report that the requested intent is not yet supported.
+    if intent.mac_amp_settings is not None and intent.mac_amp_settings.model_dump(exclude_none=True) and (algorithm, operation) != ("mac_amp", "peptide_generation"):
+        unresolved.append("mac_amp_settings_not_supported_for_selected_operation")
     if intent.numerical_goals and (algorithm, operation) != ("rl_diffusion", "sample"):
         unresolved.append("numerical_objectives_not_supported_for_selected_operation")
     if intent.target_organism and (algorithm, operation) != ("mac_amp", "peptide_generation"):
