@@ -4,5 +4,5 @@
     "baseline":"test",
     "n_samples":100,
     "batch_size_gen":100,
-    "save_to_xyz": "false"
+    "save_to_xyz": false
 }

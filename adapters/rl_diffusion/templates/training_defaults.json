@@ -1,6 +1,6 @@
 {
   "dataset": "qm9",
-  "remove_h": "true",
+  "remove_h": true,
   "batch_size": 128,
   "n_layers": 6,
   "nf": 128,

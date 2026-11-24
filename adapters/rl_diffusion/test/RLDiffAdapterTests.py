@@ -15,13 +15,13 @@ SAMPLE_EXPECTATION: dict = \
     "baseline":"test",
     "n_samples":50,
     "batch_size_gen":100,
-    "save_to_xyz":"true"
+    "save_to_xyz":True
 }
 
 TRAIN_EXPECTATION: dict = \
 {
     "dataset":"upload_molecules_001",
-    "remove_h":"true",
+    "remove_h":True,
     "batch_size":128,
     "n_layers":6,
     "nf":128,
