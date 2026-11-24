@@ -1,0 +1,8 @@
+{
+    "model_path":"outputs/edm_1",
+    "mode":"baseline",
+    "baseline":"test",
+    "n_samples":"100",
+    "batch_size_gen":"100",
+    "save_to_xyz":"False"
+}
