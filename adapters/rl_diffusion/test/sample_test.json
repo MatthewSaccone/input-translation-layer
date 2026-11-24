@@ -4,7 +4,7 @@
   "operation": "sample",
   "parameters": {
     "n_samples": 50,
-    "save_to_xyz": true
+    "save_to_xyz": "true"
   },
   "inputs": {},
   "unresolved": []
