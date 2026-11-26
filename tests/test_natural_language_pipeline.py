@@ -46,13 +46,15 @@ def test_ambiguous_request_stops_before_adapter():
     assert result.pipeline.yaml is None
 
 
-def test_rl_diffusion_explicitly_unimplemented():
+def test_rl_diffusion_review_preview_is_not_execution_ready():
     result = prepare_from_prompt(
         "Generate 20 3D molecules",
         provider=FakeProvider(algorithm_id="rl_diffusion", operation="sample", target_organism=None, n_samples=20),
         trusted_inputs={"model_ref": "registered_model_001"},
     )
-    assert result.pipeline.status == "adapter_not_implemented"
+    assert result.pipeline.status == "review_preview_only"
+    assert result.pipeline.argument_preview["execution_ready"] is False
+    assert result.pipeline.argument_preview["resource_refs"] == {"model_ref": "registered_model_001"}
     assert result.pipeline.yaml is None
 
 

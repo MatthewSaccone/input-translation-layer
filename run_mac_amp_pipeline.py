@@ -50,6 +50,12 @@ def main() -> int:
         print("Issues:")
         for issue in result.pipeline.issues:
             print(f"  - {issue}")
+    # Print blockers and warnings separately from the preview itself.
+    for warning in result.pipeline.warnings:
+        print(f"Warning: {warning}")
+    if result.pipeline.argument_preview is not None:
+        print("\nRL-Diffusion review PREVIEW (not native arguments):")
+        print(json.dumps(result.pipeline.argument_preview, indent=2, ensure_ascii=False))
     if result.pipeline.yaml:
         print("\nMAC-AMP configuration PREVIEW (resources not verified):")
         print(result.pipeline.yaml)

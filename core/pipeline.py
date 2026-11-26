@@ -2,7 +2,7 @@
 
 Interpretation is performed by `llm.interpreter` in the caller; this module
 validates its six-field output and prepares a MAC-AMP Hydra configuration.
-RL-Diffusion is intentionally excluded until its adapter is complete.
+This function is MAC-AMP-specific; the natural-language pipeline handles review routing.
 """
 from __future__ import annotations
 
@@ -22,6 +22,10 @@ class PipelineResult:
     yaml: str | None = None
     # Physical path checks are NOT proof of scientific checkpoint compatibility.
     resources_checked: bool = False
+    # This is review information, never a native command or execution result.
+    argument_preview: dict[str, Any] | None = None
+    # Warnings do not mean validation failed; they describe remaining verification work.
+    warnings: tuple[str, ...] = ()
 
 
 def prepare_mac_amp_request(
@@ -40,7 +44,7 @@ def prepare_mac_amp_request(
     if not report.valid:
         return PipelineResult("invalid_request", report.request, report.errors)
     if report.request["algorithm_id"] != "mac_amp":
-        return PipelineResult("adapter_not_implemented", report.request, ("RL-Diffusion adapter not yet integrated",))
+        return PipelineResult("adapter_not_implemented", report.request, ("Use the natural-language pipeline for RL-Diffusion review previews",))
     if verify_resources and resource_root is None:
         return PipelineResult("configuration_error", report.request, ("resource_root is required to verify resources",))
     adapter = MacAmpAdapter(
@@ -58,4 +62,8 @@ def prepare_mac_amp_request(
     return PipelineResult(
         "resources_found_not_execution_verified" if verify_resources else "config_preview_unverified",
         report.request, (), yaml_text, verify_resources,
+        warnings=(
+            "Native MAC-AMP consumption of organism-specific resources is unverified.",
+            "Configuration and file checks do not establish scientific execution readiness.",
+        ),
     )

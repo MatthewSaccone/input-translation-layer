@@ -57,19 +57,12 @@ class TestMacAmpAdapter(unittest.TestCase):
         self.assertIn('bacterium_code: "EC"', yaml_text)
         self.assertIn('model_path: "../Generation_Module/model_ckpt"', yaml_text)
 
-    def test_valid_mac_amp_with_dataset_example(self) -> None:
-        """Valid JSON from examples/mac_amp_with_dataset.json maps peptide_dataset_ref to warmup_dir."""
-        example_path = EXAMPLES_DIR / "mac_amp_with_dataset.json"
-        result = self.adapter.translate(example_path)
-
-        self.assertEqual(result.status, "success")
-        assert result.config is not None
-        self.assertEqual(result.config.target_bacterium, "Escherichia_coli")
-        self.assertEqual(result.config.bacterium_code, "EC")
-        self.assertEqual(result.config.warmup_dir, "upload_peptides_001.csv")
-
-        yaml_text = self.adapter.translate_for_downstream(example_path, save_to_specs=False)
-        self.assertIn('warmup_dir: "upload_peptides_001.csv"', yaml_text)
+    def test_unregistered_dataset_is_rejected(self) -> None:
+        """An example upload ID must never be converted into a guessed filename."""
+        result = self.adapter.translate(EXAMPLES_DIR / "mac_amp_with_dataset.json")
+        self.assertEqual(result.status, "clarification_required")
+        self.assertIsNone(result.config)
+        self.assertIn("peptide_dataset_ref", result.missing_or_ambiguous_fields)
 
     def test_organism_abbreviations_and_all_supported_bacteria(self) -> None:
         """All 5 supported MAC-AMP bacteria and common abbreviations map to canonical names and codes."""

@@ -1,114 +1,88 @@
+"""Non-executing review adapter for the shared RL-Diffusion input contract.
+
+The native model and training-data mappings have not been verified. This adapter
+therefore preserves the request for review instead of building executable inputs
+from unverified references. No model is loaded, trained or sampled here.
 """
-RL Diffusion Adapter
-Reads validated JSON output from LLM request
-Extract input data
-Passes extracted input data off to RL diffusion model
-"""
+from __future__ import annotations
 
 import json
-import argparse
+from copy import deepcopy
+from pathlib import Path
+from typing import Any, Mapping
 
-class AdapterError(Exception):
-    pass
+from core.validator import validate_translation_request
+
+
+class AdapterError(ValueError):
+    """A request cannot safely be prepared from its current information."""
 
 
 class RLDiffAdapter:
-    def __init__(self):
-        self._TRAIN_DEFAULTS: dict
-        with open("./templates/training_defaults.json", encoding="utf-8") as f:
-            self._TRAIN_DEFAULTS = json.load(f)
+    """Validate the shared contract and return a clearly labelled review preview."""
 
-        self._SAMPLE_DEFAULTS: dict
-        with open("./templates/sample_defaults.json", encoding="utf-8") as f:
-            self._SAMPLE_DEFAULTS = json.load(f)
-
-        self._ALLOWED_PARAMS = {
-            "sample": {"n_samples", "save_to_xyz", "requested_objectives"},
-            "train": {"conditioning"}
-        }
-
-        self._ACCEPTED_CONDITIONING = ["qed", "sas", "affinity"]
-
-    def open_json(self,json_file_name: str) -> dict:
-        with open(json_file_name, encoding="utf-8") as json_file:
+    def open_json(self, json_file_name: str | Path) -> dict[str, Any]:
+        # utf-8-sig also accepts files written with a Windows UTF-8 BOM.
+        with Path(json_file_name).open(encoding="utf-8-sig") as json_file:
             return json.load(json_file)
 
-    # JSON Format Example
-    # ===================
-    # {
-    #   "schema_version": "1.0",
-    #   "algorithm_id": "rl_diffusion",
-    #   "operation": "sample",
-    #   "parameters": {
-    #     "n_samples": 50,
-    #     "save_to_xyz": true
-    #   },
-    #   "inputs": {},
-    #   "unresolved": []
-    # }
+    def validate_json_features(self, json_data: Mapping[str, Any]) -> dict[str, Any]:
+        # Use the same validator as the rest of the platform instead of duplicating
+        # partial type checks here. This also checks missing and unexpected fields.
+        report = validate_translation_request(json_data)
+        if not report.valid:
+            raise AdapterError("; ".join(report.errors))
+        if report.request["algorithm_id"] != "rl_diffusion":
+            raise AdapterError("Not an RL-Diffusion request")
+        # Copy the containers so the review result cannot change the caller's data.
+        return {
+            "operation": report.request["operation"],
+            "parameters": deepcopy(dict(report.request["parameters"])),
+            "inputs": deepcopy(dict(report.request["inputs"])),
+        }
 
-    def validate_json_features(self, json_data: dict) -> dict:
-        """
-        Validates JSON features against RL diffusion model
-        Prepares features for algorithm argument conversion
-        """
-        if json_data is None:
-            raise AdapterError("Input data cannot be None")
-        if json_data["algorithm_id"] != "rl_diffusion":
-            raise AdapterError("Not an RL Diffusion request")
-        if len(json_data["unresolved"]) != 0:
-            raise AdapterError("Request contains unresolved items")
+    def generate_rl_diff_input(self, features: Mapping[str, Any]) -> dict[str, Any]:
+        """Return a review record, not native CLI arguments or a runnable config."""
+        # Recheck the contract even when this method is called outside run().
+        validated = self.validate_json_features({
+            "schema_version": "1.0",
+            "algorithm_id": "rl_diffusion",
+            "operation": features.get("operation"),
+            "parameters": features.get("parameters"),
+            "inputs": features.get("inputs"),
+            "unresolved": [],
+        })
+        operation = validated["operation"]
+        parameters = validated["parameters"]
+        inputs = validated["inputs"]
 
-        op = json_data.get("operation")
-        if op not in self._ALLOWED_PARAMS:
-            raise AdapterError("Unsupported operation")
-
-        params = json_data.get("parameters", {})
-        extra_params = set(params) - self._ALLOWED_PARAMS[op]
-        if extra_params:
-            raise AdapterError("Unexpected parameters")
-
-        features = {"operation": op, "parameters": params, "inputs": json_data.get("inputs", {}) }
-        return features
-
-    def generate_rl_diff_input(self, features: dict) -> dict:
-        params, op = features.get("parameters"), features.get("operation")
-        inputs = features.get("inputs")
-
-        rl_diff_input = {}
-
-        if op == "train":
-            ds = inputs.get("training_dataset_ref")
-            if ds is None:
-                raise AdapterError("Training dataset cannot be None")
-            rl_diff_input["dataset"] = ds
-
-            rl_diff_input["remove_h"] = self._TRAIN_DEFAULTS["remove_h"]
-            rl_diff_input["batch_size"] = self._TRAIN_DEFAULTS["batch_size"]
-            rl_diff_input["n_layers"] = self._TRAIN_DEFAULTS["n_layers"]
-            rl_diff_input["nf"] = self._TRAIN_DEFAULTS["nf"]
-            rl_diff_input["n_epochs"] = self._TRAIN_DEFAULTS["n_epochs"]
-            rl_diff_input["CUDA_DEVICES"] = self._TRAIN_DEFAULTS["CUDA_DEVICES"]
-
-            conds = params.get("conditioning", [])
-            for cond in conds:
-                if cond not in self._ACCEPTED_CONDITIONING:
-                    raise AdapterError("Unsupported conditioning: {}".format(cond))
-            rl_diff_input["conditioning"] = str.join(" ", conds)
+        # Do not substitute a resource ID for a physical path, or assume a default
+        # checkpoint exists. The algorithm owner must verify the native mapping.
+        blockers = ["Native resource mapping and compatibility are unverified."]
+        if operation == "sample":
+            blockers.append("Model reference requires verified native resource resolution.")
+            # The current native handoff cannot enforce requested objectives.
+            # Preserve them exactly in the preview rather than silently dropping them.
+            if "requested_objectives" in parameters:
+                blockers.append("Requested objectives have no verified native sampling mapping.")
         else:
-            model = self._SAMPLE_DEFAULTS["model_path"] if inputs.get("model_ref") is None else inputs.get("model_ref")
-            rl_diff_input["model_path"] = model
-            rl_diff_input["mode"] = self._SAMPLE_DEFAULTS["mode"]
-            rl_diff_input["baseline"] = self._SAMPLE_DEFAULTS["baseline"]
-            rl_diff_input["n_samples"] = params.get("n_samples", self._SAMPLE_DEFAULTS["n_samples"])
-            rl_diff_input["batch_size_gen"] = params.get("batch_size_gen", self._SAMPLE_DEFAULTS["batch_size_gen"])
-            rl_diff_input["save_to_xyz"] = params.get("save_to_xyz", self._SAMPLE_DEFAULTS["save_to_xyz"])
+            # A logical training-data reference is not the native dataset identifier.
+            # Preserve conditioning as a list; do not guess a dataset or CLI format.
+            blockers.append("Training data reference requires verified native dataset mapping.")
 
-        return rl_diff_input
+        return {
+            "status": "review_preview_only",
+            "operation": operation,
+            "parameters": parameters,
+            "resource_refs": inputs,
+            "blocking_issues": blockers,
+            "execution_ready": False,
+        }
 
-    def run(self, json_file_name: str):
-        data = self.open_json(json_file_name)
-        features = self.validate_json_features(data)
-        translation_output = self.generate_rl_diff_input(features)
+    def prepare_preview(self, request: Mapping[str, Any]) -> dict[str, Any]:
+        # In-memory entrypoint for the common pipeline; no temporary JSON is needed.
+        return self.generate_rl_diff_input(self.validate_json_features(request))
 
-        return translation_output
+    def run(self, json_file_name: str | Path) -> dict[str, Any]:
+        # Keep the historical file-based entrypoint as a compatibility wrapper.
+        return self.prepare_preview(self.open_json(json_file_name))

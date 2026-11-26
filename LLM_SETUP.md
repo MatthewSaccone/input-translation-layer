@@ -665,3 +665,29 @@ The final command calls the configured OpenAI API and may incur charges. API cre
 - **Live API extraction for this updated end-to-end runner has not yet been executed here.** Test it locally and inspect the entire JSON, not only the status.
 - `config_preview_unverified` means only that a syntactically generated preview exists. It does not verify file existence, compatibility, scientific effectiveness, or the ability to execute MAC-AMP.
 - The resource-verified mode remains available to the lower-level `prepare_mac_amp_request()` interface. No source code from the RL-Diffusion adapter was modified.
+
+
+## 18. Input-contract verification patch — 2026-11-25
+
+This entry supersedes earlier descriptions of RL-Diffusion dispatch and the adapter's return format. The interpreter and six-field JSON contract are unchanged. The patch addresses software-interface safeguards only; neither scientific model is launched or verified.
+
+- `adapters/mac_amp/translator.py`: require registration of explicit resource references even for previews. Do not invent file extensions or use logical IDs as filesystem paths. Existing YAML generation remains a preview.
+- `adapters/rl_diffusion/RLDiffAdapter.py`: reuse the core validator, support in-memory review, read BOM-prefixed JSON, retain requested settings and references, and return a structured `review_preview_only` record with `execution_ready: false`. No default checkpoint or native dataset path is inferred. Requested objectives are retained with an explicit blocker, not silently dropped. Conditioning remains a list. This changes the previous `run()` return shape intentionally. The former native argument dictionary is not emitted by this patch.
+- `core/natural_language_pipeline.py`: dispatch valid RL-Diffusion requests to the review adapter. Invalid requests stop before dispatch. Resource verification flags do not establish RL-Diffusion compatibility.
+- `core/pipeline.py` and `run_mac_amp_pipeline.py`: distinguish configuration previews, review records, and warnings. RL-Diffusion review status intentionally returns a nonzero exit code in the current CLI; it is not an execution-ready configuration.
+- Regression tests update prior assumptions and check missing references, objective preservation, invalid values, current-working-directory independence, and preview-only status.
+
+### Remaining owner verification
+
+The MAC-AMP native workflow's organism-specific configuration consumption must be checked by its owner; no native scientific code was changed. The RL-Diffusion training data reference and native dataset metadata must be independently verified, as must checkpoint compatibility and any objective-aware workflow. This patch does not implement native argument generation for either RL-Diffusion training or sampling. No real API calls or scientific model runs were performed.
+
+### Local checks
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q
+.\.venv\Scripts\python.exe adapters/rl_diffusion/test/RLDiffAdapterTests.py
+```
+
+Apply on a separate review branch because the adapter return format has changed. Review `git diff` before merging with teammates' work.
+
+**Patch verification:** 91 pytest tests passed and the standalone RL-Diffusion review smoke tests passed in the authoring environment.

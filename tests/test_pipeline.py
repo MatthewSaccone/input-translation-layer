@@ -93,3 +93,18 @@ def test_invalid_request_does_not_modify_original_object():
     result = prepare_mac_amp_request(request)
     assert result.status == "invalid_request"
     assert request == original
+
+
+def test_unregistered_model_id_is_not_a_path():
+    # A logical identifier must not be copied into a native model-path field.
+    request = mac_request()
+    request["inputs"] = {"model_ref": "unregistered_fixture"}
+    result = prepare_mac_amp_request(request)
+    assert result.status == "adapter_rejected"
+    assert result.yaml is None
+
+
+def test_configuration_preview_has_native_compatibility_warning():
+    result = prepare_mac_amp_request(mac_request())
+    assert result.status == "config_preview_unverified"
+    assert any("unverified" in warning for warning in result.warnings)

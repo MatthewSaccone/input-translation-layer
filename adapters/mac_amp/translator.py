@@ -12,7 +12,8 @@ Responsibilities:
      to the Pydantic `MacAmpConfig` model.
   3. Apply Spec-Kit defaults from `.specify/templates/config-template.json`, verify supported
      bacteria, and validate that required dataset paths, model files, and resources exist.
-  4. Generate the ready-to-run MAC-AMP_v1 Hydra `config.yaml` payload and Spec-Kit artifacts.
+  4. Generate a MAC-AMP_v1 Hydra configuration preview and Spec-Kit artifacts.
+     Native consumption and scientific execution are not verified.
 """
 
 import argparse
@@ -460,30 +461,29 @@ class SpecKitTranslator:
         dataset_ref = raw_inputs.get("peptide_dataset_ref")
         if dataset_ref and isinstance(dataset_ref, str) and dataset_ref.strip():
             ref_str = dataset_ref.strip()
-            if self.verify_resources and ref_str not in self.resource_registry:
+            if ref_str not in self.resource_registry:
                 return TranslationResult(
                     status="clarification_required", config=None,
                     missing_or_ambiguous_fields=["peptide_dataset_ref"],
-                    clarification_message="Dataset reference must be registered before verification.",
+                    clarification_message="Dataset reference must be registered before configuration preparation.",
                 )
-            resolved_ds = self.resource_registry.get(ref_str, ref_str)
-            # Legacy unverified fixtures use logical IDs; never guess extensions
-            # for registered paths or verified execution requests.
-            if not self.verify_resources and ref_str not in self.resource_registry and not str(resolved_ds).lower().endswith(".csv"):
-                resolved_ds = f"{resolved_ds}.csv"
+            # A resource ID is not a filename. Only use the trusted registry's mapping;
+            # do not invent a file extension or fall back to the ID as a path.
+            resolved_ds = self.resource_registry[ref_str]
             mapped_kwargs.setdefault("warmup_dir", str(resolved_ds))
 
         # Map inputs.model_ref -> model_path if model_path not explicitly overridden
         model_ref = raw_inputs.get("model_ref")
         if model_ref and isinstance(model_ref, str) and model_ref.strip():
             ref_str = model_ref.strip()
-            if self.verify_resources and ref_str not in self.resource_registry:
+            if ref_str not in self.resource_registry:
                 return TranslationResult(
                     status="clarification_required", config=None,
                     missing_or_ambiguous_fields=["model_ref"],
-                    clarification_message="Model reference must be registered before verification.",
+                    clarification_message="Model reference must be registered before configuration preparation.",
                 )
-            resolved_model = self.resource_registry.get(ref_str, ref_str)
+            # The same rule applies to model references: never treat an ID as a path.
+            resolved_model = self.resource_registry[ref_str]
             mapped_kwargs.setdefault("model_path", str(resolved_model))
 
         # Check required target_bacterium

@@ -1,7 +1,7 @@
-"""Researcher prompt -> interpretation -> validation -> MAC-AMP YAML preview.
+"""Researcher prompt -> interpretation -> validation -> non-executing preview.
 
-No scientific algorithms are executed, and this module writes no files.
-The unfinished RL-Diffusion adapter is explicitly not dispatched.
+MAC-AMP returns a configuration preview; RL-Diffusion returns a review record.
+Neither path verifies scientific execution readiness or writes files.
 """
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
+from adapters.rl_diffusion.RLDiffAdapter import AdapterError, RLDiffAdapter
 from core.pipeline import PipelineResult, prepare_mac_amp_request
 from core.validator import validate_translation_request
 from llm.interpreter import IntentProvider, interpret_user_prompt
@@ -29,7 +30,7 @@ def prepare_from_prompt(
     resource_registry: Mapping[str, str | Path] | None = None,
     verify_resources: bool = False,
 ) -> NaturalLanguagePipelineResult:
-    """Interpret once, validate, then dispatch only MAC-AMP requests.
+    """Interpret once, validate, then dispatch to a non-executing adapter.
 
     This is a non-executing preview, not an assertion of scientific readiness.
     """
@@ -40,12 +41,20 @@ def prepare_from_prompt(
             request,
             PipelineResult("invalid_request", report.request, report.errors),
         )
-    if request["algorithm_id"] != "mac_amp":
+    if request["algorithm_id"] == "rl_diffusion":
+        # Dispatch only to the review adapter. Do not resolve native paths or launch
+        # scientific jobs until the algorithm owner has verified the handoff.
+        try:
+            preview = RLDiffAdapter().prepare_preview(report.request)
+        except AdapterError as exc:
+            return NaturalLanguagePipelineResult(
+                request, PipelineResult("adapter_rejected", report.request, (str(exc),))
+            )
         return NaturalLanguagePipelineResult(
             request,
             PipelineResult(
-                "adapter_not_implemented", request,
-                ("RL-Diffusion adapter is not yet integrated",),
+                "review_preview_only", report.request,
+                tuple(preview["blocking_issues"]), argument_preview=preview,
             ),
         )
     return NaturalLanguagePipelineResult(
